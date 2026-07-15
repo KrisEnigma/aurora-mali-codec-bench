@@ -21,7 +21,7 @@ STRIP := arm-linux-gnueabi-strip
 
 .PHONY: all clean check-glibc
 
-all: dwt_bench_armel mali_vk_bench_armel
+all: dwt_bench_armel mali_vk_bench_armel sentinel_test_armel
 
 src/dwt_shader_spv.h: shaders/dwt_lifting.comp scripts/embed_shader.sh
 	./scripts/embed_shader.sh shaders/dwt_lifting.comp src/dwt_shader_spv.h dwt_lifting
@@ -37,13 +37,20 @@ mali_vk_bench_armel: src/mali_vk_bench.c src/wavelet_shader_spv.h
 	$(CC) $(CFLAGS) -DSHADER_HEADER='"wavelet_shader_spv.h"' -Isrc -o $@ src/mali_vk_bench.c $(LDFLAGS)
 	$(STRIP) $@
 
+src/sentinel_shader_spv.h: shaders/sentinel_test.comp scripts/embed_shader.sh
+	./scripts/embed_shader.sh shaders/sentinel_test.comp src/sentinel_shader_spv.h sentinel_test
+
+sentinel_test_armel: src/sentinel_test.c src/sentinel_shader_spv.h
+	$(CC) $(CFLAGS) -DSHADER_HEADER='"sentinel_shader_spv.h"' -Isrc -o $@ src/sentinel_test.c $(LDFLAGS)
+	$(STRIP) $@
+
 # Sanity check: fails the build if a required GLIBC symbol version exceeds
 # what the TV actually has (2.35). Run after building.
-check-glibc: dwt_bench_armel mali_vk_bench_armel
+check-glibc: dwt_bench_armel mali_vk_bench_armel sentinel_test_armel
 	@for f in $^; do \
 		echo "== $$f =="; \
 		arm-linux-gnueabi-objdump -T $$f | grep -o 'GLIBC_2\.[0-9]*' | sort -Vu; \
 	done
 
 clean:
-	rm -f dwt_bench_armel mali_vk_bench_armel src/dwt_shader_spv.h src/wavelet_shader_spv.h
+	rm -f dwt_bench_armel mali_vk_bench_armel sentinel_test_armel src/dwt_shader_spv.h src/wavelet_shader_spv.h src/sentinel_shader_spv.h
