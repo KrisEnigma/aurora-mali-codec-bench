@@ -93,13 +93,65 @@ Next step: rerun bounded with `timeout`, and/or reduce `N_ITERS` for the
 higher resolutions to isolate whether it's slow-but-progressing or actually
 stuck.
 
-## Practical takeaway (provisional, pending the completed 1440p/3.5k numbers)
+## Confirmed driver bug: multi-barrier compute shaders fail silently
 
-The 1080p numbers (0.13ms forward / 0.12ms inverse) are dramatically faster
-than the naive single-dispatch proxy suggested, and comfortably beat the
-current ~8.5ms HEVC hardware decode path if they hold up at higher resolutions
-— but 1080p halves the per-level pixel count fastest, so it's the
-*easiest* case for this workload. Whether the same margin survives at 1440p
-and 3.5k (the resolutions actually in scope, per current interest — 4K is
-explicitly not a target right now) is the open question the interrupted run
-was meant to answer.
+**Root cause, confirmed via `diag_suite`:** any compute shader containing
+more than one `barrier()` call produces **zero writes** on this Mali-G510 /
+driver 46.0.0, regardless of whether the surrounding logic is conditional or
+unconditional. This is independent of the wavelet math entirely — a trivial
+shader that just does `x += 1.0; barrier(); x += 2.0;` fails exactly the same
+way as the real 4-stage lifting shader did.
+
+Diagnostic matrix (16 known samples, compared against hand-computed expected
+values):
+
+| Variant | Barriers | Conditional writes | Result |
+|---|---|---|---|
+| Baseline | 1 | No | **PASS** |
+| Count test | 2 | No | **FAIL** (no write at all — buffer stayed at pre-dispatch sentinel) |
+| Conditional test | 2 | Yes (isOdd) | **FAIL** (same failure mode) |
+| Real-shader-shaped | 4 | Yes (isOdd) | **FAIL** (same failure mode) |
+
+The failure mode is not wrong math or a hang — it's a **complete absence of
+any write to the output buffer**, as verified by pre-filling the destination
+buffer with a distinct sentinel value (`-1.0`) that stays completely
+untouched after dispatch. Every Vulkan API call up to and including
+`vkWaitForFences` returns `VK_SUCCESS`; there is no error surfaced anywhere
+in the API. This makes it a specifically dangerous bug to develop against,
+since nothing about the API usage signals that anything is wrong.
+
+**Workaround:** split each lifting stage into its own dispatch (one
+`barrier()` each, the proven-working pattern), chained via buffer ping-pong
+between GPU-side `vkCmdPipelineBarrier` calls (a different, much more
+standard synchronization primitive than in-shader `barrier()`, not
+implicated by this bug) instead of fusing multiple stages with multiple
+in-shader barriers. This is what `dwt_lifting_staged.comp` / the current
+`dwt_bench.c` does. Cost: 5x more dispatches per axis/level (predict1,
+update1, predict2, update2, scale, each as a separate dispatch) instead of
+1 fused dispatch, which will show up as real, higher latency in the timing
+numbers — but those numbers will be trustworthy, unlike the earlier fused
+ones.
+
+**Not yet independently verified:** whether *multiple separate dispatches
+within one command buffer*, synchronized via `vkCmdPipelineBarrier` (a
+command-buffer-level primitive, not the in-shader `barrier()` that's
+confirmed broken), also has issues on this driver. This is an extremely
+standard, near-universal pattern (unlike multiple in-shader barriers, which
+is comparatively rare), so it's a reasonable working assumption, but it
+hasn't been directly isolated the way the in-shader barrier count was. If
+timing numbers from the staged benchmark look implausible again, this
+assumption is the next thing to test in isolation.
+
+## Practical implication for Aurora/Vibepollo
+
+If a real PyroWave-style port is ever attempted for LG webOS TVs on Mali
+GPUs, **fused multi-stage shared-memory compute kernels are not a safe
+default assumption** on all Mali driver versions in the field. A production
+implementation would need either: (a) a driver-version check with a
+fallback to the staged/non-fused dispatch pattern, or (b) confirmation from
+ARM/Mali driver release notes on whether this is a known, fixed-in-a-later-
+version issue. Worth a search on Mali driver bug trackers or the Sunshine/
+Aurora issue trackers for prior reports of this pattern before assuming it's
+undiscovered.
+
+

@@ -1,0 +1,82 @@
+#version 450
+
+// One lifting STAGE per dispatch (selected via push constant `stage`),
+// each doing exactly one barrier — the pattern proven to work on this
+// driver. Previously all 4 stages + scale were fused into one dispatch
+// with 4 barriers, which the diagnostic suite confirmed fails outright
+// on this Mali-G510 / driver 46.0.0 (any >1 barrier compute shader
+// produces zero writes, independent of conditional logic).
+
+layout(local_size_x = 256, local_size_y = 1) in;
+
+layout(std430, binding = 0) readonly buffer Src { float srcData[]; };
+layout(std430, binding = 1) writeonly buffer Dst { float dstData[]; };
+
+layout(push_constant) uniform PC {
+    uint direction;    // 0 = horizontal, 1 = vertical
+    uint mode;         // 0 = forward (encode), 1 = inverse (decode)
+    uint stage;        // 0..4: predict1/update1/predict2/update2/scale
+                       // (inverse order reversed by the host loop)
+    uint fullWidth;
+    uint activeWidth;
+    uint activeHeight;
+} pc;
+
+const float ALPHA = -1.586134342;
+const float BETA  = -0.05298011854;
+const float GAMMA =  0.8829110762;
+const float DELTA =  0.4435068522;
+const float KAPPA =  1.230174105;
+
+#define HALO 4
+shared float tile[256 + 2 * HALO];
+
+int clampIdx(int idx, int hi) { return clamp(idx, 0, hi); }
+
+int toGlobal(int linePos, int lineIndex) {
+    if (pc.direction == 0u) return lineIndex * int(pc.fullWidth) + linePos;
+    else return linePos * int(pc.fullWidth) + lineIndex;
+}
+
+void main() {
+    uint lineLen  = (pc.direction == 0u) ? pc.activeWidth  : pc.activeHeight;
+    uint numLines = (pc.direction == 0u) ? pc.activeHeight : pc.activeWidth;
+    uint lineIndex = gl_GlobalInvocationID.y;
+    if (lineIndex >= numLines) return;
+
+    int tid = int(gl_LocalInvocationID.x);
+    int localBase = int(gl_WorkGroupID.x) * 256;
+
+    int gp = localBase + tid - HALO;
+    tile[tid] = srcData[toGlobal(clampIdx(gp, int(lineLen) - 1), int(lineIndex))];
+    if (tid < 2 * HALO) {
+        int gp2 = localBase + 256 + tid - HALO;
+        tile[256 + tid] = srcData[toGlobal(clampIdx(gp2, int(lineLen) - 1), int(lineIndex))];
+    }
+    barrier(); // exactly one barrier per dispatch — the proven-working pattern
+
+    int i = tid + HALO;
+    int globalHome = localBase + tid;
+    if (globalHome >= int(lineLen)) return;
+
+    bool isOdd = (globalHome & 1) == 1;
+    float v = tile[i]; // default: pass through unchanged if this stage doesn't touch this parity
+
+    if (pc.mode == 0u) {
+        // forward (encode-equivalent)
+        if (pc.stage == 0u && isOdd)  v += ALPHA * (tile[i-1] + tile[i+1]);
+        if (pc.stage == 1u && !isOdd) v += BETA  * (tile[i-1] + tile[i+1]);
+        if (pc.stage == 2u && isOdd)  v += GAMMA * (tile[i-1] + tile[i+1]);
+        if (pc.stage == 3u && !isOdd) v += DELTA * (tile[i-1] + tile[i+1]);
+        if (pc.stage == 4u) v = isOdd ? v * KAPPA : v * (1.0 / KAPPA);
+    } else {
+        // inverse (decode-equivalent), stage order/signs mirrored by host loop
+        if (pc.stage == 0u) v = isOdd ? v * (1.0 / KAPPA) : v * KAPPA;
+        if (pc.stage == 1u && !isOdd) v -= DELTA * (tile[i-1] + tile[i+1]);
+        if (pc.stage == 2u && isOdd)  v -= GAMMA * (tile[i-1] + tile[i+1]);
+        if (pc.stage == 3u && !isOdd) v -= BETA  * (tile[i-1] + tile[i+1]);
+        if (pc.stage == 4u && isOdd)  v -= ALPHA * (tile[i-1] + tile[i+1]);
+    }
+
+    dstData[toGlobal(globalHome, int(lineIndex))] = v;
+}

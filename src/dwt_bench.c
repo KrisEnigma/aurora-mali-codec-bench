@@ -31,12 +31,14 @@ static void check(VkResult r, const char *what) {
 typedef struct {
     uint32_t direction;   // 0 = horizontal, 1 = vertical
     uint32_t mode;        // 0 = forward, 1 = inverse
+    uint32_t stage;       // 0..4: predict1/update1/predict2/update2/scale
     uint32_t fullWidth;
     uint32_t activeWidth;
     uint32_t activeHeight;
 } PushConst;
 
 #define N_LEVELS 4
+#define N_STAGES 5
 
 int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: %s /path/to/libmali.so\n", argv[0]); return 1; }
@@ -207,7 +209,7 @@ int main(int argc, char **argv) {
     check(vkAllocateCommandBuffers(device, &cbai, &cmd), "vkAllocateCommandBuffers");
 
     const uint32_t N_ITERS = 15;
-    const uint32_t DISPATCHES_PER_CHAIN = N_LEVELS * 2; // levels x (horizontal + vertical)
+    const uint32_t DISPATCHES_PER_CHAIN = N_LEVELS * 2 * N_STAGES; // levels x (horizontal + vertical) x 5 stages
     VkQueryPoolCreateInfo qpci = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
         .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = N_ITERS * 2 };
     VkQueryPool queryPool;
@@ -223,38 +225,39 @@ int main(int argc, char **argv) {
     };
 
     // ---- Smoke test: verify the shader actually does the transform ----
-    // Runs ONE forward horizontal pass on 16 known samples and compares
-    // against a host-computed reference using identical math + boundary
-    // handling, before trusting any timing numbers from the full chain.
+    // Runs the full 5-stage forward horizontal pass (as 5 separate
+    // single-barrier dispatches, ping-ponging buffers between stages) on
+    // 16 known samples, compared against a host-computed reference.
     {
         const uint32_t N = 16;
         float initVal[16];
         for (uint32_t i = 0; i < N; i++) initVal[i] = 0.5f;
         memcpy(mappedA, initVal, sizeof(initVal));
 
-        PushConst pc = { 0, 0, N, N, 1 }; // horizontal, forward, fullWidth=N, activeW=N, activeH=1
-        VkCommandBufferBeginInfo cbbi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-        check(vkBeginCommandBuffer(cmd, &cbbi), "smoke vkBeginCommandBuffer");
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descSets[0], 0, NULL);
-        vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-        vkCmdDispatch(cmd, 1, 1, 1); // 16 samples fits in one workgroup of 256
+        int pingpong = 0; // 0 = next dispatch reads A writes B, 1 = reads B writes A
+        for (uint32_t stage = 0; stage < N_STAGES; stage++) {
+            PushConst pc = { 0, 0, stage, N, N, 1 }; // horizontal, forward, this stage
+            VkCommandBufferBeginInfo cbbi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+            check(vkBeginCommandBuffer(cmd, &cbbi), "smoke vkBeginCommandBuffer");
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descSets[pingpong], 0, NULL);
+            vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+            vkCmdDispatch(cmd, 1, 1, 1);
 
-        // Explicit shader-write -> host-read barrier. Spec-wise, waiting on
-        // the fence below should already make HOST_COHERENT writes visible,
-        // but adding this explicitly in case this driver needs it anyway.
-        VkMemoryBarrier hostBarrier = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT };
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
-                              0, 1, &hostBarrier, 0, NULL, 0, NULL);
+            VkMemoryBarrier hostBarrier = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT };
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                  0, 1, &hostBarrier, 0, NULL, 0, NULL);
+            check(vkEndCommandBuffer(cmd), "smoke vkEndCommandBuffer");
 
-        check(vkEndCommandBuffer(cmd), "smoke vkEndCommandBuffer");
+            VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd };
+            check(vkResetFences(device, 1, &fence), "smoke vkResetFences");
+            check(vkQueueSubmit(queue, 1, &si, fence), "smoke vkQueueSubmit");
+            check(vkWaitForFences(device, 1, &fence, VK_TRUE, 10ull * 1000 * 1000 * 1000), "smoke vkWaitForFences");
 
-        VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd };
-        check(vkResetFences(device, 1, &fence), "smoke vkResetFences");
-        check(vkQueueSubmit(queue, 1, &si, fence), "smoke vkQueueSubmit");
-        VkResult wr = vkWaitForFences(device, 1, &fence, VK_TRUE, 10ull * 1000 * 1000 * 1000);
-        check(wr, "smoke vkWaitForFences");
+            pingpong ^= 1;
+        }
+        // 5 stages (odd count) starting with A->B means final result is in B.
 
         // Host-computed reference: identical math and clamped boundary
         // handling as the shader, run on plain floats.
@@ -270,7 +273,7 @@ int main(int argc, char **argv) {
         for (uint32_t i = 0; i < N; i += 2) ref[i] = ref[i] + DELTA_REF * (NEIGH(ref,i,-1) + NEIGH(ref,i,1));
         for (uint32_t i = 0; i < N; i++) ref[i] = (i % 2 == 1) ? ref[i] * KAPPA_REF : ref[i] * (1.0f / KAPPA_REF);
 
-        printf("Smoke test (1 forward horizontal pass, 16 samples, all init to 0.5):\n");
+        printf("Smoke test (5-stage forward horizontal pass, 16 samples, all init to 0.5):\n");
         printf("  GPU:  ");
         for (uint32_t i = 0; i < N; i++) printf("%.6f ", ((float*)mappedB)[i]);
         printf("\n  Host reference: ");
@@ -309,23 +312,27 @@ int main(int argc, char **argv) {
 
                 int pingpong = 0; // 0 = next dispatch reads A writes B, 1 = reads B writes A
                 for (int step = 0; step < (int)DISPATCHES_PER_CHAIN; step++) {
-                    int level, axis, mode;
+                    int level, axis, stage, mode;
                     uint32_t activeW, activeH;
 
                     if (passType == 0) {
-                        level = step / 2;
-                        axis = step % 2;
+                        level = step / (2 * N_STAGES);
+                        int rem = step % (2 * N_STAGES);
+                        axis = rem / N_STAGES;
+                        stage = rem % N_STAGES;
                         mode = 0;
                     } else {
                         int fstep = (int)DISPATCHES_PER_CHAIN - 1 - step;
-                        level = fstep / 2;
-                        axis = fstep % 2;
+                        level = fstep / (2 * N_STAGES);
+                        int rem = fstep % (2 * N_STAGES);
+                        axis = rem / N_STAGES;
+                        stage = rem % N_STAGES;
                         mode = 1;
                     }
                     activeW = fullW >> level;
                     activeH = fullH >> level;
 
-                    PushConst pc = { (uint32_t)axis, (uint32_t)mode, fullW, activeW, activeH };
+                    PushConst pc = { (uint32_t)axis, (uint32_t)mode, (uint32_t)stage, fullW, activeW, activeH };
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descSets[pingpong], 0, NULL);
                     vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
 

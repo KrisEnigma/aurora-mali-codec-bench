@@ -23,8 +23,8 @@ STRIP := arm-linux-gnueabi-strip
 
 all: dwt_bench_armel mali_vk_bench_armel sentinel_test_armel tile_bisect_test_armel nobranch_bisect_test_armel diag_suite_armel
 
-src/dwt_shader_spv.h: shaders/dwt_lifting.comp scripts/embed_shader.sh
-	./scripts/embed_shader.sh shaders/dwt_lifting.comp src/dwt_shader_spv.h dwt_lifting
+src/dwt_shader_spv.h: shaders/dwt_lifting_staged.comp scripts/embed_shader.sh
+	./scripts/embed_shader.sh shaders/dwt_lifting_staged.comp src/dwt_shader_spv.h dwt_lifting
 
 src/wavelet_shader_spv.h: shaders/wavelet_bench.comp scripts/embed_shader.sh
 	./scripts/embed_shader.sh shaders/wavelet_bench.comp src/wavelet_shader_spv.h wavelet_bench
