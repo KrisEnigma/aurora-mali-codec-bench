@@ -1,0 +1,9 @@
+# Build artifacts
+dwt_bench_armel
+mali_vk_bench_armel
+src/dwt_shader_spv.h
+src/wavelet_shader_spv.h
+*.o
+
+# Fetched once by scripts/fetch_headers.sh, not vendored
+vulkan_inc/
