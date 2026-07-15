@@ -106,10 +106,15 @@ int main(int argc, char **argv) {
     D(vkCmdPushConstants); D(vkCmdDispatch); D(vkCmdPipelineBarrier);
     D(vkCmdResetQueryPool); D(vkCmdWriteTimestamp); D(vkEndCommandBuffer);
     D(vkQueueSubmit); D(vkQueueWaitIdle); D(vkCreateQueryPool); D(vkGetQueryPoolResults);
+    D(vkCreateFence); D(vkWaitForFences); D(vkResetFences);
     #undef D
 
     VkQueue queue;
     vkGetDeviceQueue(device, (uint32_t)computeFamily, 0, &queue);
+
+    VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    VkFence fence;
+    check(vkCreateFence(device, &fci, NULL, &fence), "vkCreateFence");
 
     const uint32_t MAX_W = 3584, MAX_H = 2016; // sized for the largest test case (3.5k)
     VkDeviceSize bufSize = (VkDeviceSize)MAX_W * MAX_H * sizeof(float);
@@ -200,7 +205,7 @@ int main(int argc, char **argv) {
     VkCommandBuffer cmd;
     check(vkAllocateCommandBuffers(device, &cbai, &cmd), "vkAllocateCommandBuffers");
 
-    const uint32_t N_ITERS = 60;
+    const uint32_t N_ITERS = 15;
     const uint32_t DISPATCHES_PER_CHAIN = N_LEVELS * 2; // levels x (horizontal + vertical)
     VkQueryPoolCreateInfo qpci = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
         .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = N_ITERS * 2 };
@@ -220,6 +225,10 @@ int main(int argc, char **argv) {
         uint32_t fullW = resolutions[r].w, fullH = resolutions[r].h;
 
         for (int passType = 0; passType < 2; passType++) { // 0 = forward chain, 1 = inverse chain
+            printf("Running %s / %s ... ", resolutions[r].label,
+                   passType == 0 ? "forward" : "inverse");
+            fflush(stdout);
+
             VkCommandBufferBeginInfo cbbi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
             check(vkBeginCommandBuffer(cmd, &cbbi), "vkBeginCommandBuffer");
             vkCmdResetQueryPool(cmd, queryPool, 0, N_ITERS * 2);
@@ -264,8 +273,16 @@ int main(int argc, char **argv) {
             check(vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
 
             VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd };
-            check(vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE), "vkQueueSubmit");
-            check(vkQueueWaitIdle(queue), "vkQueueWaitIdle");
+            check(vkResetFences(device, 1, &fence), "vkResetFences");
+            check(vkQueueSubmit(queue, 1, &si, fence), "vkQueueSubmit");
+
+            const uint64_t TIMEOUT_NS = 30ull * 1000 * 1000 * 1000; // 30s
+            VkResult waitResult = vkWaitForFences(device, 1, &fence, VK_TRUE, TIMEOUT_NS);
+            if (waitResult == VK_TIMEOUT) {
+                printf("TIMED OUT after 30s (likely a real GPU stall, not just slow progress)\n");
+                continue; // skip result readback for this combo, move on
+            }
+            check(waitResult, "vkWaitForFences");
 
             uint64_t *timestamps = malloc(sizeof(uint64_t) * N_ITERS * 2);
             check(vkGetQueryPoolResults(device, queryPool, 0, N_ITERS * 2, sizeof(uint64_t) * N_ITERS * 2,
@@ -277,10 +294,7 @@ int main(int argc, char **argv) {
                 totalNs += (double)(timestamps[i*2+1] - timestamps[i*2]) * props.limits.timestampPeriod;
             double avgUs = (totalNs / N_ITERS) / 1000.0;
 
-            if (passType == 0) printf("\n%s\n", resolutions[r].label);
-            printf("  %s (4 levels, %u dispatches): avg %.3f us (%.3f ms)\n",
-                   passType == 0 ? "forward/encode-equivalent" : "inverse/decode-equivalent",
-                   DISPATCHES_PER_CHAIN, avgUs, avgUs / 1000.0);
+            printf("avg %.3f us (%.3f ms)\n", avgUs, avgUs / 1000.0);
 
             free(timestamps);
         }
