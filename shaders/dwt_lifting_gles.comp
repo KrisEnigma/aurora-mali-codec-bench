@@ -1,0 +1,77 @@
+#version 310 es
+
+// GLES equivalent of dwt_lifting_staged.comp: same staged design (one
+// barrier per dispatch, stage selected externally), but push constants
+// don't exist in GLES, so parameters come from a small UBO instead,
+// updated via glBufferSubData before each dispatch.
+
+layout(local_size_x = 256, local_size_y = 1) in;
+
+layout(std430, binding = 0) readonly buffer Src { float srcData[]; };
+layout(std430, binding = 1) buffer Dst { float dstData[]; };
+
+layout(std140, binding = 0) uniform PC {
+    uint direction;
+    uint mode;
+    uint stage;
+    uint fullWidth;
+    uint activeWidth;
+    uint activeHeight;
+};
+
+const float ALPHA = -1.586134342;
+const float BETA  = -0.05298011854;
+const float GAMMA =  0.8829110762;
+const float DELTA =  0.4435068522;
+const float KAPPA =  1.230174105;
+
+#define HALO 4
+shared float tile[256 + 2 * HALO];
+
+int clampIdx(int idx, int hi) { return clamp(idx, 0, hi); }
+
+int toGlobal(int linePos, int lineIndex) {
+    if (direction == 0u) return lineIndex * int(fullWidth) + linePos;
+    else return linePos * int(fullWidth) + lineIndex;
+}
+
+void main() {
+    uint lineLen  = (direction == 0u) ? activeWidth  : activeHeight;
+    uint numLines = (direction == 0u) ? activeHeight : activeWidth;
+    uint lineIndex = gl_GlobalInvocationID.y;
+    if (lineIndex >= numLines) return;
+
+    int tid = int(gl_LocalInvocationID.x);
+    int localBase = int(gl_WorkGroupID.x) * 256;
+
+    int gp = localBase + tid - HALO;
+    tile[tid] = srcData[toGlobal(clampIdx(gp, int(lineLen) - 1), int(lineIndex))];
+    if (tid < 2 * HALO) {
+        int gp2 = localBase + 256 + tid - HALO;
+        tile[256 + tid] = srcData[toGlobal(clampIdx(gp2, int(lineLen) - 1), int(lineIndex))];
+    }
+    barrier();
+
+    int i = tid + HALO;
+    int globalHome = localBase + tid;
+    if (globalHome >= int(lineLen)) return;
+
+    bool isOdd = (globalHome & 1) == 1;
+    float v = tile[i];
+
+    if (mode == 0u) {
+        if (stage == 0u && isOdd)  v += ALPHA * (tile[i-1] + tile[i+1]);
+        if (stage == 1u && !isOdd) v += BETA  * (tile[i-1] + tile[i+1]);
+        if (stage == 2u && isOdd)  v += GAMMA * (tile[i-1] + tile[i+1]);
+        if (stage == 3u && !isOdd) v += DELTA * (tile[i-1] + tile[i+1]);
+        if (stage == 4u) v = isOdd ? v * KAPPA : v * (1.0 / KAPPA);
+    } else {
+        if (stage == 0u) v = isOdd ? v * (1.0 / KAPPA) : v * KAPPA;
+        if (stage == 1u && !isOdd) v -= DELTA * (tile[i-1] + tile[i+1]);
+        if (stage == 2u && isOdd)  v -= GAMMA * (tile[i-1] + tile[i+1]);
+        if (stage == 3u && !isOdd) v -= BETA  * (tile[i-1] + tile[i+1]);
+        if (stage == 4u && isOdd)  v -= ALPHA * (tile[i-1] + tile[i+1]);
+    }
+
+    dstData[toGlobal(globalHome, int(lineIndex))] = v;
+}
