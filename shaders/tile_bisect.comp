@@ -1,0 +1,54 @@
+#version 450
+
+// Structurally identical to dwt_lifting.comp (two-buffer descriptor set,
+// shared-memory tile + halo load, one barrier) but the actual "compute"
+// step is trivial and unconditional: tile[i] = tile[i] * 2.0 + 1.0.
+// Used to isolate whether the bug is in this shared structure, or
+// specifically in dwt_lifting's multi-stage conditional lifting math.
+
+layout(local_size_x = 256, local_size_y = 1) in;
+
+layout(std430, binding = 0) readonly buffer Src { float srcData[]; };
+layout(std430, binding = 1) writeonly buffer Dst { float dstData[]; };
+
+layout(push_constant) uniform PC {
+    uint direction;
+    uint mode;
+    uint fullWidth;
+    uint activeWidth;
+    uint activeHeight;
+} pc;
+
+#define HALO 4
+shared float tile[256 + 2 * HALO];
+
+int clampIdx(int idx, int hi) { return clamp(idx, 0, hi); }
+
+void main() {
+    uint lineLen = pc.activeWidth;
+    uint lineIndex = gl_GlobalInvocationID.y;
+    if (lineIndex >= pc.activeHeight) return;
+
+    int tid = int(gl_LocalInvocationID.x);
+    int localBase = int(gl_WorkGroupID.x) * 256;
+
+    int gp = localBase + tid - HALO;
+    int clamped = clampIdx(gp, int(lineLen) - 1);
+    tile[tid] = srcData[int(lineIndex) * int(pc.fullWidth) + clamped];
+
+    if (tid < 2 * HALO) {
+        int gp2 = localBase + 256 + tid - HALO;
+        int c2 = clampIdx(gp2, int(lineLen) - 1);
+        tile[256 + tid] = srcData[int(lineIndex) * int(pc.fullWidth) + c2];
+    }
+    barrier();
+
+    int i = tid + HALO;
+    int globalHome = localBase + tid;
+    if (globalHome >= int(lineLen)) return;
+
+    // Trivial, unconditional, no branching, no multi-stage barriers.
+    tile[i] = tile[i] * 2.0 + 1.0;
+
+    dstData[int(lineIndex) * int(pc.fullWidth) + globalHome] = tile[i];
+}
