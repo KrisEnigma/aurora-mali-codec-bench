@@ -239,6 +239,15 @@ int main(int argc, char **argv) {
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descSets[0], 0, NULL);
         vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
         vkCmdDispatch(cmd, 1, 1, 1); // 16 samples fits in one workgroup of 256
+
+        // Explicit shader-write -> host-read barrier. Spec-wise, waiting on
+        // the fence below should already make HOST_COHERENT writes visible,
+        // but adding this explicitly in case this driver needs it anyway.
+        VkMemoryBarrier hostBarrier = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT };
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                              0, 1, &hostBarrier, 0, NULL, 0, NULL);
+
         check(vkEndCommandBuffer(cmd), "smoke vkEndCommandBuffer");
 
         VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd };
