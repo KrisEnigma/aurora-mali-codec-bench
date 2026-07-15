@@ -1,0 +1,36 @@
+#version 450
+// VARIANT: 4 barriers, unconditional writes each stage (matches the real
+// shader's barrier COUNT but with no conditional branching at all).
+// Expected: 0.5 + 1.0 + 2.0 + 3.0 + 4.0 = 10.5 for all.
+layout(local_size_x = 256, local_size_y = 1) in;
+layout(std430, binding = 0) readonly buffer Src { float srcData[]; };
+layout(std430, binding = 1) writeonly buffer Dst { float dstData[]; };
+layout(push_constant) uniform PC { uint direction, mode, fullWidth, activeWidth, activeHeight; } pc;
+#define HALO 4
+shared float tile[256 + 2 * HALO];
+int clampIdx(int idx, int hi) { return clamp(idx, 0, hi); }
+void main() {
+    uint lineLen = pc.activeWidth;
+    uint lineIndex = gl_GlobalInvocationID.y;
+    if (lineIndex >= pc.activeHeight) return;
+    int tid = int(gl_LocalInvocationID.x);
+    int localBase = int(gl_WorkGroupID.x) * 256;
+    int gp = localBase + tid - HALO;
+    tile[tid] = srcData[int(lineIndex) * int(pc.fullWidth) + clampIdx(gp, int(lineLen) - 1)];
+    if (tid < 2 * HALO) {
+        int gp2 = localBase + 256 + tid - HALO;
+        tile[256 + tid] = srcData[int(lineIndex) * int(pc.fullWidth) + clampIdx(gp2, int(lineLen) - 1)];
+    }
+    barrier();
+    int i = tid + HALO;
+    int globalHome = localBase + tid;
+    if (globalHome >= int(lineLen)) return;
+    tile[i] += 1.0;
+    barrier();
+    tile[i] += 2.0;
+    barrier();
+    tile[i] += 3.0;
+    barrier();
+    tile[i] += 4.0;
+    dstData[int(lineIndex) * int(pc.fullWidth) + globalHome] = tile[i];
+}

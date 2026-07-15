@@ -21,7 +21,7 @@ STRIP := arm-linux-gnueabi-strip
 
 .PHONY: all clean check-glibc
 
-all: dwt_bench_armel mali_vk_bench_armel sentinel_test_armel tile_bisect_test_armel nobranch_bisect_test_armel
+all: dwt_bench_armel mali_vk_bench_armel sentinel_test_armel tile_bisect_test_armel nobranch_bisect_test_armel diag_suite_armel
 
 src/dwt_shader_spv.h: shaders/dwt_lifting.comp scripts/embed_shader.sh
 	./scripts/embed_shader.sh shaders/dwt_lifting.comp src/dwt_shader_spv.h dwt_lifting
@@ -58,14 +58,31 @@ nobranch_bisect_test_armel: src/nobranch_bisect_test.c src/nobranch_bisect_shade
 	$(CC) $(CFLAGS) -DSHADER_HEADER='"nobranch_bisect_shader_spv.h"' -Isrc -o $@ src/nobranch_bisect_test.c $(LDFLAGS)
 	$(STRIP) $@
 
+src/diag_1barrier_unconditional_spv.h: shaders/diag_1barrier_unconditional.comp scripts/embed_shader.sh
+	./scripts/embed_shader.sh shaders/diag_1barrier_unconditional.comp src/diag_1barrier_unconditional_spv.h diag_1barrier_unconditional
+
+src/diag_2barrier_unconditional_spv.h: shaders/diag_2barrier_unconditional.comp scripts/embed_shader.sh
+	./scripts/embed_shader.sh shaders/diag_2barrier_unconditional.comp src/diag_2barrier_unconditional_spv.h diag_2barrier_unconditional
+
+src/diag_2barrier_conditional_spv.h: shaders/diag_2barrier_conditional.comp scripts/embed_shader.sh
+	./scripts/embed_shader.sh shaders/diag_2barrier_conditional.comp src/diag_2barrier_conditional_spv.h diag_2barrier_conditional
+
+src/diag_4barrier_unconditional_spv.h: shaders/diag_4barrier_unconditional.comp scripts/embed_shader.sh
+	./scripts/embed_shader.sh shaders/diag_4barrier_unconditional.comp src/diag_4barrier_unconditional_spv.h diag_4barrier_unconditional
+
+diag_suite_armel: src/diag_suite.c src/diag_1barrier_unconditional_spv.h src/diag_2barrier_unconditional_spv.h src/diag_2barrier_conditional_spv.h src/diag_4barrier_unconditional_spv.h
+	$(CC) $(CFLAGS) -Isrc -o $@ src/diag_suite.c $(LDFLAGS)
+	$(STRIP) $@
+
 # Sanity check: fails the build if a required GLIBC symbol version exceeds
 # what the TV actually has (2.35). Run after building.
-check-glibc: dwt_bench_armel mali_vk_bench_armel sentinel_test_armel tile_bisect_test_armel nobranch_bisect_test_armel
+check-glibc: dwt_bench_armel mali_vk_bench_armel sentinel_test_armel tile_bisect_test_armel nobranch_bisect_test_armel diag_suite_armel
 	@for f in $^; do \
 		echo "== $$f =="; \
 		arm-linux-gnueabi-objdump -T $$f | grep -o 'GLIBC_2\.[0-9]*' | sort -Vu; \
 	done
 
 clean:
-	rm -f dwt_bench_armel mali_vk_bench_armel sentinel_test_armel tile_bisect_test_armel nobranch_bisect_test_armel \
-	      src/dwt_shader_spv.h src/wavelet_shader_spv.h src/sentinel_shader_spv.h src/tile_bisect_shader_spv.h src/nobranch_bisect_shader_spv.h
+	rm -f dwt_bench_armel mali_vk_bench_armel sentinel_test_armel tile_bisect_test_armel nobranch_bisect_test_armel diag_suite_armel \
+	      src/dwt_shader_spv.h src/wavelet_shader_spv.h src/sentinel_shader_spv.h src/tile_bisect_shader_spv.h src/nobranch_bisect_shader_spv.h \
+	      src/diag_1barrier_unconditional_spv.h src/diag_2barrier_unconditional_spv.h src/diag_2barrier_conditional_spv.h src/diag_4barrier_unconditional_spv.h
