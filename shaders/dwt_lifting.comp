@@ -1,0 +1,98 @@
+#version 450
+
+// Real CDF 9/7 lifting-scheme DWT, one axis per dispatch, fused into a
+// single shared-memory tile pass (predict1/update1/predict2/update2/scale
+// all happen in on-chip shared memory with barriers between stages,
+// mirroring the fusion technique that makes tile-based wavelet codecs like
+// PyroWave fast: minimal global memory round-trips per transform stage).
+//
+// Uses ping-pong buffers (src != dst) to avoid cross-workgroup read/write
+// races at tile boundaries, since different workgroups aren't synchronized
+// with each other within one dispatch.
+
+layout(local_size_x = 256, local_size_y = 1) in;
+
+layout(std430, binding = 0) readonly buffer Src { float srcData[]; };
+layout(std430, binding = 1) writeonly buffer Dst { float dstData[]; };
+
+layout(push_constant) uniform PC {
+    uint direction;    // 0 = horizontal (along rows), 1 = vertical (along columns)
+    uint mode;         // 0 = forward (encode), 1 = inverse (decode)
+    uint fullWidth;    // stride of the full buffer (constant across levels)
+    uint activeWidth;  // active region width at this decomposition level
+    uint activeHeight; // active region height at this decomposition level
+} pc;
+
+const float ALPHA = -1.586134342;
+const float BETA  = -0.05298011854;
+const float GAMMA =  0.8829110762;
+const float DELTA =  0.4435068522;
+const float KAPPA =  1.230174105;
+
+#define HALO 4
+shared float tile[256 + 2 * HALO];
+
+int clampIdx(int idx, int hi) {
+    return clamp(idx, 0, hi);
+}
+
+int toGlobal(int linePos, int lineIndex) {
+    if (pc.direction == 0u) {
+        return lineIndex * int(pc.fullWidth) + linePos;   // horizontal: fixed row
+    } else {
+        return linePos * int(pc.fullWidth) + lineIndex;   // vertical: fixed column
+    }
+}
+
+void main() {
+    uint lineLen   = (pc.direction == 0u) ? pc.activeWidth  : pc.activeHeight;
+    uint numLines  = (pc.direction == 0u) ? pc.activeHeight : pc.activeWidth;
+    uint lineIndex = gl_GlobalInvocationID.y;
+    if (lineIndex >= numLines) return;
+
+    int tid = int(gl_LocalInvocationID.x);
+    int localBase = int(gl_WorkGroupID.x) * 256;
+
+    // Load main tile body + leading halo
+    int gp = localBase + tid - HALO;
+    tile[tid] = srcData[toGlobal(clampIdx(gp, int(lineLen) - 1), int(lineIndex))];
+
+    // Trailing halo, loaded by the first 2*HALO threads
+    if (tid < 2 * HALO) {
+        int gp2 = localBase + 256 + tid - HALO;
+        tile[256 + tid] = srcData[toGlobal(clampIdx(gp2, int(lineLen) - 1), int(lineIndex))];
+    }
+    barrier();
+
+    int i = tid + HALO;
+    int globalHome = localBase + tid;
+    if (globalHome >= int(lineLen)) return;
+
+    bool isOdd = (globalHome & 1) == 1;
+
+    if (pc.mode == 0u) {
+        // ---- forward lifting (encode-equivalent) ----
+        if (isOdd)  tile[i] += ALPHA * (tile[i-1] + tile[i+1]);
+        barrier();
+        if (!isOdd) tile[i] += BETA  * (tile[i-1] + tile[i+1]);
+        barrier();
+        if (isOdd)  tile[i] += GAMMA * (tile[i-1] + tile[i+1]);
+        barrier();
+        if (!isOdd) tile[i] += DELTA * (tile[i-1] + tile[i+1]);
+        barrier();
+        tile[i] = isOdd ? tile[i] * KAPPA : tile[i] * (1.0 / KAPPA);
+    } else {
+        // ---- inverse lifting (decode-equivalent), steps reversed & negated ----
+        tile[i] = isOdd ? tile[i] * (1.0 / KAPPA) : tile[i] * KAPPA;
+        barrier();
+        if (!isOdd) tile[i] -= DELTA * (tile[i-1] + tile[i+1]);
+        barrier();
+        if (isOdd)  tile[i] -= GAMMA * (tile[i-1] + tile[i+1]);
+        barrier();
+        if (!isOdd) tile[i] -= BETA  * (tile[i-1] + tile[i+1]);
+        barrier();
+        if (isOdd)  tile[i] -= ALPHA * (tile[i-1] + tile[i+1]);
+    }
+
+    dstData[toGlobal(globalHome, int(lineIndex))] = tile[i];
+}

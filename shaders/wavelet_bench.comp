@@ -1,0 +1,38 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, binding = 0) buffer Buf {
+    float data[];
+};
+
+layout(push_constant) uniform PC {
+    uint width;
+    uint height;
+} pc;
+
+// Simulates the shape of a wavelet lifting pass: several sequential
+// multiply-add steps per pixel, each depending on the previous result,
+// approximating the arithmetic (not the exact math) of a CDF 9/7 pass
+// like the one PyroWave uses.
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (x >= pc.width || y >= pc.height) return;
+
+    uint idx = y * pc.width + x;
+    float v = data[idx];
+
+    // ~8 lifting-shaped multiply-add steps, each with a different
+    // coefficient, chained so the compiler can't collapse them.
+    v = v * 1.586134342f + 0.5f;
+    v = v * -0.05298011854f + 0.25f;
+    v = v * 0.8829110762f + 0.125f;
+    v = v * -0.4435068522f + 0.0625f;
+    v = v * 1.149604398f - 0.03125f;
+    v = v * -0.869864452f + 0.015625f;
+    v = v * 1.061452387f - 0.0078125f;
+    v = v * -0.943947735f + 0.00390625f;
+
+    data[idx] = v;
+}
