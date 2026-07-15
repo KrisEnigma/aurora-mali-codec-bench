@@ -109,7 +109,7 @@ int main(int argc, char **argv) {
     D(vkCmdPushConstants); D(vkCmdDispatch); D(vkCmdPipelineBarrier);
     D(vkCmdResetQueryPool); D(vkCmdWriteTimestamp); D(vkEndCommandBuffer);
     D(vkQueueSubmit); D(vkQueueWaitIdle); D(vkCreateQueryPool); D(vkGetQueryPoolResults);
-    D(vkCreateFence); D(vkWaitForFences); D(vkResetFences);
+    D(vkCreateFence); D(vkWaitForFences); D(vkResetFences); D(vkCmdFillBuffer);
     #undef D
 
     VkQueue queue;
@@ -131,7 +131,7 @@ int main(int argc, char **argv) {
 
     for (int b = 0; b < 2; b++) {
         VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size = bufSize, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
+            .size = bufSize, .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
         VkBuffer *buf = (b == 0) ? &bufA : &bufB;
         check(vkCreateBuffer(device, &bci, NULL, buf), "vkCreateBuffer");
 
@@ -308,6 +308,22 @@ int main(int argc, char **argv) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
             for (uint32_t iter = 0; iter < N_ITERS; iter++) {
+                // Reset both buffers to clean 0.5 data before every iteration.
+                // Without this, each iteration re-transforms whatever the
+                // PREVIOUS iteration already produced — 15 repeated forward
+                // applications in a row (never inverted back) can blow up
+                // in magnitude since some lifting coefficients are >1, which
+                // risks NaN/Inf/denormal values that some GPUs handle via a
+                // much slower path, potentially explaining runs that look
+                // "stuck" rather than just slow.
+                const uint32_t FLOAT_0_5_BITS = 0x3F000000u;
+                vkCmdFillBuffer(cmd, bufA, 0, VK_WHOLE_SIZE, FLOAT_0_5_BITS);
+                vkCmdFillBuffer(cmd, bufB, 0, VK_WHOLE_SIZE, FLOAT_0_5_BITS);
+                VkMemoryBarrier fillBarrier = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                    .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_SHADER_READ_BIT };
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                      0, 1, &fillBarrier, 0, NULL, 0, NULL);
+
                 vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool, iter * 2);
 
                 int pingpong = 0; // 0 = next dispatch reads A writes B, 1 = reads B writes A
