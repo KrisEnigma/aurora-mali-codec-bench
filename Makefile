@@ -21,7 +21,7 @@ STRIP := arm-linux-gnueabi-strip
 
 .PHONY: all clean check-glibc
 
-all: dwt_bench_armel mali_vk_bench_armel sentinel_test_armel tile_bisect_test_armel
+all: dwt_bench_armel mali_vk_bench_armel sentinel_test_armel tile_bisect_test_armel nobranch_bisect_test_armel
 
 src/dwt_shader_spv.h: shaders/dwt_lifting.comp scripts/embed_shader.sh
 	./scripts/embed_shader.sh shaders/dwt_lifting.comp src/dwt_shader_spv.h dwt_lifting
@@ -51,14 +51,21 @@ tile_bisect_test_armel: src/tile_bisect_test.c src/tile_bisect_shader_spv.h
 	$(CC) $(CFLAGS) -DSHADER_HEADER='"tile_bisect_shader_spv.h"' -Isrc -o $@ src/tile_bisect_test.c $(LDFLAGS)
 	$(STRIP) $@
 
+src/nobranch_bisect_shader_spv.h: shaders/nobranch_bisect.comp scripts/embed_shader.sh
+	./scripts/embed_shader.sh shaders/nobranch_bisect.comp src/nobranch_bisect_shader_spv.h nobranch_bisect
+
+nobranch_bisect_test_armel: src/nobranch_bisect_test.c src/nobranch_bisect_shader_spv.h
+	$(CC) $(CFLAGS) -DSHADER_HEADER='"nobranch_bisect_shader_spv.h"' -Isrc -o $@ src/nobranch_bisect_test.c $(LDFLAGS)
+	$(STRIP) $@
+
 # Sanity check: fails the build if a required GLIBC symbol version exceeds
 # what the TV actually has (2.35). Run after building.
-check-glibc: dwt_bench_armel mali_vk_bench_armel sentinel_test_armel tile_bisect_test_armel
+check-glibc: dwt_bench_armel mali_vk_bench_armel sentinel_test_armel tile_bisect_test_armel nobranch_bisect_test_armel
 	@for f in $^; do \
 		echo "== $$f =="; \
 		arm-linux-gnueabi-objdump -T $$f | grep -o 'GLIBC_2\.[0-9]*' | sort -Vu; \
 	done
 
 clean:
-	rm -f dwt_bench_armel mali_vk_bench_armel sentinel_test_armel tile_bisect_test_armel \
-	      src/dwt_shader_spv.h src/wavelet_shader_spv.h src/sentinel_shader_spv.h src/tile_bisect_shader_spv.h
+	rm -f dwt_bench_armel mali_vk_bench_armel sentinel_test_armel tile_bisect_test_armel nobranch_bisect_test_armel \
+	      src/dwt_shader_spv.h src/wavelet_shader_spv.h src/sentinel_shader_spv.h src/tile_bisect_shader_spv.h src/nobranch_bisect_shader_spv.h
