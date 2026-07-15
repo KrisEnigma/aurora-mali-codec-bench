@@ -21,7 +21,7 @@ STRIP := arm-linux-gnueabi-strip
 
 .PHONY: all clean check-glibc
 
-all: dwt_bench_armel mali_vk_bench_armel sentinel_test_armel tile_bisect_test_armel nobranch_bisect_test_armel diag_suite_armel vk_1080p_single_armel gles_1080p_single_armel
+all: dwt_bench_armel mali_vk_bench_armel sentinel_test_armel tile_bisect_test_armel nobranch_bisect_test_armel diag_suite_armel vk_1080p_single_armel gles_1080p_single_armel vk_1080p_overhead_armel
 
 src/dwt_shader_spv.h: shaders/dwt_lifting_staged.comp scripts/embed_shader.sh
 	./scripts/embed_shader.sh shaders/dwt_lifting_staged.comp src/dwt_shader_spv.h dwt_lifting
@@ -78,19 +78,26 @@ vk_1080p_single_armel: src/vk_1080p_single.c src/dwt_shader_spv.h
 	$(CC) $(CFLAGS) -Isrc -o $@ src/vk_1080p_single.c $(LDFLAGS)
 	$(STRIP) $@
 
+src/trivial_copy_spv.h: shaders/trivial_copy.comp scripts/embed_shader.sh
+	./scripts/embed_shader.sh shaders/trivial_copy.comp src/trivial_copy_spv.h trivial_copy
+
+vk_1080p_overhead_armel: src/vk_1080p_overhead.c src/trivial_copy_spv.h
+	$(CC) $(CFLAGS) -Isrc -o $@ src/vk_1080p_overhead.c $(LDFLAGS)
+	$(STRIP) $@
+
 gles_1080p_single_armel: src/gles_1080p_single.c
 	$(CC) -O2 -std=c11 -D_POSIX_C_SOURCE=200809L -Igles_headers -o $@ src/gles_1080p_single.c $(LDFLAGS)
 	$(STRIP) $@
 
 # Sanity check: fails the build if a required GLIBC symbol version exceeds
 # what the TV actually has (2.35). Run after building.
-check-glibc: dwt_bench_armel mali_vk_bench_armel sentinel_test_armel tile_bisect_test_armel nobranch_bisect_test_armel diag_suite_armel vk_1080p_single_armel gles_1080p_single_armel
+check-glibc: dwt_bench_armel mali_vk_bench_armel sentinel_test_armel tile_bisect_test_armel nobranch_bisect_test_armel diag_suite_armel vk_1080p_single_armel gles_1080p_single_armel vk_1080p_overhead_armel
 	@for f in $^; do \
 		echo "== $$f =="; \
 		arm-linux-gnueabi-objdump -T $$f | grep -o 'GLIBC_2\.[0-9]*' | sort -Vu; \
 	done
 
 clean:
-	rm -f dwt_bench_armel mali_vk_bench_armel sentinel_test_armel tile_bisect_test_armel nobranch_bisect_test_armel diag_suite_armel vk_1080p_single_armel gles_1080p_single_armel \
+	rm -f dwt_bench_armel mali_vk_bench_armel sentinel_test_armel tile_bisect_test_armel nobranch_bisect_test_armel diag_suite_armel vk_1080p_single_armel gles_1080p_single_armel vk_1080p_overhead_armel \
 	      src/dwt_shader_spv.h src/wavelet_shader_spv.h src/sentinel_shader_spv.h src/tile_bisect_shader_spv.h src/nobranch_bisect_shader_spv.h \
-	      src/diag_1barrier_unconditional_spv.h src/diag_2barrier_unconditional_spv.h src/diag_2barrier_conditional_spv.h src/diag_4barrier_unconditional_spv.h
+	      src/diag_1barrier_unconditional_spv.h src/diag_2barrier_unconditional_spv.h src/diag_2barrier_conditional_spv.h src/diag_4barrier_unconditional_spv.h src/trivial_copy_spv.h

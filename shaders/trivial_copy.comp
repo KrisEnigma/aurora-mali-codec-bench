@@ -1,0 +1,31 @@
+#version 450
+
+// Deliberately trivial: no shared memory, no halo, no barrier. Same
+// dispatch dimensions and same 40-dispatch loop structure as the real
+// lifting benchmark, but with the minimum possible per-thread work.
+// Isolates how much of the real benchmark's time is dispatch/memory
+// overhead versus actual lifting compute.
+
+layout(local_size_x = 256, local_size_y = 1) in;
+
+layout(std430, binding = 0) readonly buffer Src { float srcData[]; };
+layout(std430, binding = 1) writeonly buffer Dst { float dstData[]; };
+
+layout(push_constant) uniform PC {
+    uint direction, mode, stage, fullWidth, activeWidth, activeHeight;
+} pc;
+
+void main() {
+    uint lineLen  = (pc.direction == 0u) ? pc.activeWidth  : pc.activeHeight;
+    uint numLines = (pc.direction == 0u) ? pc.activeHeight : pc.activeWidth;
+    uint lineIndex = gl_GlobalInvocationID.y;
+    if (lineIndex >= numLines) return;
+    uint linePos = gl_GlobalInvocationID.x;
+    if (linePos >= lineLen) return;
+
+    int idx = (pc.direction == 0u)
+        ? int(lineIndex) * int(pc.fullWidth) + int(linePos)
+        : int(linePos) * int(pc.fullWidth) + int(lineIndex);
+
+    dstData[idx] = srcData[idx];
+}
