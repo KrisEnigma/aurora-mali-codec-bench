@@ -17,6 +17,7 @@
 #include <string.h>
 #include <dlfcn.h>
 #include <time.h>
+#include <math.h>
 
 static PFN_vkGetInstanceProcAddr pfn_vkGetInstanceProcAddr;
 #define GET_IPROC(inst, name) (PFN_##name)pfn_vkGetInstanceProcAddr(inst, #name)
@@ -220,6 +221,61 @@ int main(int argc, char **argv) {
         { "1440p (2560x1440)", 2560, 1440 },
         { "3.5k  (3584x2016)", 3584, 2016 },
     };
+
+    // ---- Smoke test: verify the shader actually does the transform ----
+    // Runs ONE forward horizontal pass on 16 known samples and compares
+    // against a host-computed reference using identical math + boundary
+    // handling, before trusting any timing numbers from the full chain.
+    {
+        const uint32_t N = 16;
+        float initVal[16];
+        for (uint32_t i = 0; i < N; i++) initVal[i] = 0.5f;
+        memcpy(mappedA, initVal, sizeof(initVal));
+
+        PushConst pc = { 0, 0, N, N, 1 }; // horizontal, forward, fullWidth=N, activeW=N, activeH=1
+        VkCommandBufferBeginInfo cbbi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        check(vkBeginCommandBuffer(cmd, &cbbi), "smoke vkBeginCommandBuffer");
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descSets[0], 0, NULL);
+        vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, 1, 1, 1); // 16 samples fits in one workgroup of 256
+        check(vkEndCommandBuffer(cmd), "smoke vkEndCommandBuffer");
+
+        VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd };
+        check(vkResetFences(device, 1, &fence), "smoke vkResetFences");
+        check(vkQueueSubmit(queue, 1, &si, fence), "smoke vkQueueSubmit");
+        VkResult wr = vkWaitForFences(device, 1, &fence, VK_TRUE, 10ull * 1000 * 1000 * 1000);
+        check(wr, "smoke vkWaitForFences");
+
+        // Host-computed reference: identical math and clamped boundary
+        // handling as the shader, run on plain floats.
+        const float ALPHA_REF = -1.586134342f, BETA_REF = -0.05298011854f;
+        const float GAMMA_REF = 0.8829110762f, DELTA_REF = 0.4435068522f, KAPPA_REF = 1.230174105f;
+        float ref[16];
+        memcpy(ref, initVal, sizeof(initVal));
+        #define CLAMP16(x) ((x) < 0 ? 0 : ((x) >= (int)N ? (int)N - 1 : (x)))
+        #define NEIGH(arr, idx, off) arr[CLAMP16((int)(idx) + (off))]
+        for (uint32_t i = 1; i < N; i += 2) ref[i] = ref[i] + ALPHA_REF * (NEIGH(ref,i,-1) + NEIGH(ref,i,1));
+        for (uint32_t i = 0; i < N; i += 2) ref[i] = ref[i] + BETA_REF  * (NEIGH(ref,i,-1) + NEIGH(ref,i,1));
+        for (uint32_t i = 1; i < N; i += 2) ref[i] = ref[i] + GAMMA_REF * (NEIGH(ref,i,-1) + NEIGH(ref,i,1));
+        for (uint32_t i = 0; i < N; i += 2) ref[i] = ref[i] + DELTA_REF * (NEIGH(ref,i,-1) + NEIGH(ref,i,1));
+        for (uint32_t i = 0; i < N; i++) ref[i] = (i % 2 == 1) ? ref[i] * KAPPA_REF : ref[i] * (1.0f / KAPPA_REF);
+
+        printf("Smoke test (1 forward horizontal pass, 16 samples, all init to 0.5):\n");
+        printf("  GPU:  ");
+        for (uint32_t i = 0; i < N; i++) printf("%.6f ", ((float*)mappedB)[i]);
+        printf("\n  Host reference: ");
+        for (uint32_t i = 0; i < N; i++) printf("%.6f ", ref[i]);
+        printf("\n");
+        int mismatch = 0;
+        for (uint32_t i = 0; i < N; i++)
+            if (fabsf(((float*)mappedB)[i] - ref[i]) > 1e-4f) mismatch = 1;
+        printf("  -> %s\n\n", mismatch ? "MISMATCH: shader output does not match expected math" : "MATCH: shader is executing the transform correctly");
+
+        // Reset buffers back to 0.5 for the main benchmark loop below.
+        for (uint32_t i = 0; i < MAX_W * MAX_H; i++) ((float*)mappedA)[i] = 0.5f;
+        for (uint32_t i = 0; i < MAX_W * MAX_H; i++) ((float*)mappedB)[i] = 0.5f;
+    }
 
     for (int r = 0; r < 3; r++) {
         uint32_t fullW = resolutions[r].w, fullH = resolutions[r].h;
