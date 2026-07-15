@@ -224,6 +224,11 @@ int main(int argc, char **argv) {
     for (int r = 0; r < 3; r++) {
         uint32_t fullW = resolutions[r].w, fullH = resolutions[r].h;
 
+        printf("\n%s — per-level active dimensions: ", resolutions[r].label);
+        for (int lvl = 0; lvl < N_LEVELS; lvl++)
+            printf("L%d=%ux%u ", lvl, fullW >> lvl, fullH >> lvl);
+        printf("\n");
+
         for (int passType = 0; passType < 2; passType++) { // 0 = forward chain, 1 = inverse chain
             printf("Running %s / %s ... ", resolutions[r].label,
                    passType == 0 ? "forward" : "inverse");
@@ -299,6 +304,13 @@ int main(int argc, char **argv) {
             free(timestamps);
         }
     }
+
+    printf("\nCorrectness sanity check (buffer started uniformly at 0.5):\n");
+    printf("  bufA[0..7]: ");
+    for (int i = 0; i < 8; i++) printf("%.6f ", ((float*)mappedA)[i]);
+    printf("\n  bufB[0..7]: ");
+    for (int i = 0; i < 8; i++) printf("%.6f ", ((float*)mappedB)[i]);
+    printf("\n  (if these are still exactly 0.500000, the shader did not execute)\n");
 
     printf("\nDone.\n");
     return 0;
