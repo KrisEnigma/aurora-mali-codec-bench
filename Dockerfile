@@ -2,6 +2,7 @@ FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc-arm-linux-gnueabi \
+    libc6-dev-armel-cross \
     glslang-tools \
     python3 \
     curl \
@@ -11,11 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /work
 
-# Headers are fetched at build time so the image doesn't need to be rebuilt
-# when only source/shader files change (they're cached in a separate layer).
-COPY scripts/fetch_headers.sh scripts/fetch_headers.sh
-RUN ./scripts/fetch_headers.sh
-
-COPY . .
-
-CMD ["make", "check-glibc"]
+# NOTE: this image intentionally does NOT COPY project files or fetch
+# headers at build time. Every real usage bind-mounts the host checkout over
+# /work at `docker run` time (`-v "$(pwd)":/work`), which replaces anything
+# baked into /work during the build anyway — so a build-time fetch would
+# just be silently shadowed and never actually used. Fetch headers and build
+# at `docker run` time instead (see README.md).
